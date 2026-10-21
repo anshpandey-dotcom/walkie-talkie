@@ -6,62 +6,69 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.ServiceConnection
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.location.LocationManager
 import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.IBinder
+import android.os.Looper
 import android.provider.Settings
 import android.view.MotionEvent
+import android.view.TextureView
 import android.view.View
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.TextView
-import kotlin.math.roundToInt
 
 @SuppressLint("MissingPermission", "ClickableViewAccessibility", "SetTextI18n")
-class MainActivity : Activity(), RadioLink.Listener {
-
-    private class Peer(val id: String, val name: String)
+class MainActivity : Activity(), RadioService.Ui, ServiceConnection {
 
     private lateinit var prefs: SharedPreferences
-    private lateinit var link: RadioLink
     private lateinit var callsignInput: EditText
     private lateinit var statusView: TextView
     private lateinit var signalView: TextView
     private lateinit var searchButton: Button
     private lateinit var peerList: ListView
+    private lateinit var videoPanel: View
+    private lateinit var remoteView: ImageView
+    private lateinit var localView: TextureView
     private lateinit var chatList: ListView
     private lateinit var chatBar: LinearLayout
     private lateinit var messageInput: EditText
     private lateinit var talkButton: Button
     private lateinit var voxButton: Button
+    private lateinit var videoButton: Button
     private lateinit var disconnectButton: Button
     private lateinit var peerAdapter: ArrayAdapter<String>
     private lateinit var chatAdapter: ArrayAdapter<String>
 
-    private val audio = AudioEngine()
-    private val peers = ArrayList<Peer>()
+    private val handler = Handler(Looper.getMainLooper())
     private val peerLabels = ArrayList<String>()
     private val messages = ArrayList<String>()
     private var bluetooth: BluetoothAdapter? = null
-    private var proximity: Proximity? = null
+    private var radio: RadioService? = null
     private var request: AlertDialog? = null
-    private var searching = false
-    private var peerName = ""
-    private var reconnectTo: String? = null
-    private var closedByUser = false
-    private var distanceText = "--"
-    private var signalPercent = 100
-    private var pingMs = 0
+    private var video: VideoSender? = null
+
+    private val hideRemote = Runnable {
+        remoteView.setImageDrawable(null)
+        remoteView.visibility = View.GONE
+        if (video == null) videoPanel.visibility = View.GONE
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -75,11 +82,15 @@ class MainActivity : Activity(), RadioLink.Listener {
         signalView = findViewById(R.id.signal)
         searchButton = findViewById(R.id.search)
         peerList = findViewById(R.id.peers)
+        videoPanel = findViewById(R.id.video_panel)
+        remoteView = findViewById(R.id.remote_video)
+        localView = findViewById(R.id.local_video)
         chatList = findViewById(R.id.chat)
         chatBar = findViewById(R.id.chat_bar)
         messageInput = findViewById(R.id.message)
         talkButton = findViewById(R.id.talk)
         voxButton = findViewById(R.id.vox)
+        videoButton = findViewById(R.id.video)
         disconnectButton = findViewById(R.id.disconnect)
 
         peerAdapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, peerLabels)
@@ -89,42 +100,39 @@ class MainActivity : Activity(), RadioLink.Listener {
 
         callsignInput.setText(prefs.getString("callsign", null) ?: "UNIT-${(100..999).random()}")
         bluetooth = (getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
-        link = RadioLink(this, this)
 
         searchButton.setOnClickListener {
-            if (searching) stopSearch() else if (ready()) startSearch()
+            val service = radio ?: return@setOnClickListener
+            if (service.searching) service.stopSearch() else if (ready()) startSearch(service)
         }
         peerList.setOnItemClickListener { _, _, position, _ ->
-            val peer = peers.getOrNull(position) ?: return@setOnItemClickListener
-            reconnectTo = null
-            setStatus("Calling ${peer.name}...")
-            link.connect(peer.id)
+            val service = radio ?: return@setOnItemClickListener
+            service.peers.getOrNull(position)?.let { service.connect(it) }
         }
         talkButton.setOnTouchListener { view, event ->
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
                     view.isPressed = true
-                    audio.pushToTalk = true
+                    radio?.setTouchTalk(true)
                     true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     view.isPressed = false
-                    audio.pushToTalk = false
+                    radio?.setTouchTalk(false)
                     true
                 }
                 else -> false
             }
         }
-        voxButton.setOnClickListener {
-            audio.vox = !audio.vox
-            voxButton.text = if (audio.vox) "VOX: ON" else "VOX: OFF"
+        voxButton.setOnClickListener { radio?.toggleVox() }
+        videoButton.setOnClickListener {
+            when {
+                video != null -> stopVideo()
+                checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED -> startVideo()
+                else -> requestPermissions(arrayOf(Manifest.permission.CAMERA), CAMERA_REQUEST)
+            }
         }
-        disconnectButton.setOnClickListener {
-            reconnectTo = null
-            closedByUser = true
-            link.disconnect()
-            onDisconnected()
-        }
+        disconnectButton.setOnClickListener { radio?.hangUp() }
         findViewById<Button>(R.id.send).setOnClickListener { sendMessage() }
         messageInput.setOnEditorActionListener { _, action, _ ->
             if (action == EditorInfo.IME_ACTION_SEND) {
@@ -135,13 +143,39 @@ class MainActivity : Activity(), RadioLink.Listener {
             }
         }
 
-        showIdle()
         if (bluetooth == null) {
-            setStatus("This phone has no Bluetooth")
+            statusView.text = "This phone has no Bluetooth"
             searchButton.isEnabled = false
         } else {
             ready()
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        bindService(Intent(this, RadioService::class.java), this, Context.BIND_AUTO_CREATE)
+    }
+
+    override fun onStop() {
+        stopVideo()
+        handler.removeCallbacks(hideRemote)
+        request?.dismiss()
+        radio?.ui = null
+        radio = null
+        unbindService(this)
+        super.onStop()
+    }
+
+    override fun onServiceConnected(name: ComponentName, binder: IBinder) {
+        val service = (binder as RadioService.LocalBinder).service
+        radio = service
+        service.ui = this
+        refresh()
+        service.pendingRequest?.let { onIncoming(it.id, it.name) }
+    }
+
+    override fun onServiceDisconnected(name: ComponentName) {
+        radio = null
     }
 
     private fun callsign(): String {
@@ -149,38 +183,42 @@ class MainActivity : Activity(), RadioLink.Listener {
         return text.ifEmpty { "UNIT-${(100..999).random()}" }
     }
 
-    private fun neededPermissions(): List<String> {
-        val list = mutableListOf(Manifest.permission.RECORD_AUDIO)
+    private fun requiredPermissions(): List<String> {
+        val list = mutableListOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.ACCESS_COARSE_LOCATION)
         if (Build.VERSION.SDK_INT >= 31) {
             list.add(Manifest.permission.BLUETOOTH_SCAN)
             list.add(Manifest.permission.BLUETOOTH_ADVERTISE)
             list.add(Manifest.permission.BLUETOOTH_CONNECT)
         }
-        if (Build.VERSION.SDK_INT >= 33) {
-            list.add(Manifest.permission.NEARBY_WIFI_DEVICES)
-        } else {
-            list.add(Manifest.permission.ACCESS_FINE_LOCATION)
-        }
+        if (Build.VERSION.SDK_INT >= 33) list.add(Manifest.permission.NEARBY_WIFI_DEVICES)
         return list
+    }
+
+    private fun optionalPermissions(): List<String> {
+        val list = mutableListOf(Manifest.permission.ACCESS_FINE_LOCATION)
+        if (Build.VERSION.SDK_INT >= 33) list.add(Manifest.permission.POST_NOTIFICATIONS)
+        return list
+    }
+
+    private fun granted(permission: String): Boolean {
+        return checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
     }
 
     private fun ready(): Boolean {
         val adapter = bluetooth ?: return false
-        val missing = neededPermissions().filter {
-            checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED
-        }
-        if (missing.isNotEmpty()) {
-            requestPermissions(missing.toTypedArray(), 1)
+        if (requiredPermissions().any { !granted(it) }) {
+            val ask = (requiredPermissions() + optionalPermissions()).filter { !granted(it) }
+            requestPermissions(ask.toTypedArray(), PERMISSION_REQUEST)
             return false
         }
         if (!adapter.isEnabled) {
             startActivity(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
             return false
         }
-        if (Build.VERSION.SDK_INT in 28..32) {
+        if (Build.VERSION.SDK_INT >= 28) {
             val location = getSystemService(Context.LOCATION_SERVICE) as LocationManager
             if (!location.isLocationEnabled) {
-                setStatus("Turn on Location, then press SEARCH")
+                statusView.text = "Turn on Location, then press SEARCH"
                 startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
                 return false
             }
@@ -194,79 +232,91 @@ class MainActivity : Activity(), RadioLink.Listener {
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (grantResults.any { it != PackageManager.PERMISSION_GRANTED }) {
-            setStatus("Allow all permissions, then press SEARCH")
+        if (requestCode == CAMERA_REQUEST) {
+            if (granted(Manifest.permission.CAMERA)) startVideo()
+            return
+        }
+        statusView.text = if (requiredPermissions().all { granted(it) }) {
+            "Ready. Press SEARCH on both phones."
         } else {
-            setStatus("Ready. Press SEARCH on both phones.")
+            "Allow all permissions (Location too), then press SEARCH"
         }
     }
 
-    private fun startSearch() {
+    private fun startSearch(service: RadioService) {
         val name = callsign()
         callsignInput.setText(name)
         prefs.edit().putString("callsign", name).apply()
-        peers.clear()
-        peerLabels.clear()
-        peerAdapter.notifyDataSetChanged()
-        link.search(name)
-        searching = true
-        searchButton.text = "STOP SEARCH"
-        setStatus("On air as $name. Looking for radios... Keep Bluetooth and Wi-Fi ON, no internet needed.")
-    }
-
-    private fun stopSearch() {
-        link.stopSearch()
-        searching = false
-        searchButton.text = "SEARCH"
-        setStatus("Search stopped")
+        val intent = Intent(this, RadioService::class.java)
+        if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent) else startService(intent)
+        service.search(name)
     }
 
     private fun sendMessage() {
         val text = messageInput.text.toString().trim()
-        if (text.isEmpty() || !link.isConnected) return
-        link.sendText(text)
-        addMessage("ME", text)
+        if (text.isEmpty()) return
+        radio?.sendText(text)
         messageInput.setText("")
     }
 
-    private fun addMessage(from: String, text: String) {
-        messages.add("$from: $text")
-        chatAdapter.notifyDataSetChanged()
-        chatList.setSelection(messages.size - 1)
+    private fun startVideo() {
+        if (radio?.connected != true || video != null) return
+        videoPanel.visibility = View.VISIBLE
+        localView.visibility = View.VISIBLE
+        video = VideoSender(localView) { jpeg, rotation -> radio?.sendVideo(jpeg, rotation) ?: false }.also { it.start() }
+        videoButton.text = "VIDEO: ON"
     }
 
-    private fun showIdle() {
-        callsignInput.isEnabled = true
-        searchButton.visibility = View.VISIBLE
-        peerList.visibility = View.VISIBLE
-        signalView.visibility = View.GONE
-        chatList.visibility = View.GONE
-        chatBar.visibility = View.GONE
-        talkButton.isEnabled = false
-        talkButton.text = "HOLD TO TALK"
-        voxButton.isEnabled = false
-        disconnectButton.isEnabled = false
+    private fun stopVideo() {
+        video?.stop()
+        video = null
+        localView.visibility = View.GONE
+        if (remoteView.visibility != View.VISIBLE) videoPanel.visibility = View.GONE
+        videoButton.text = "VIDEO: OFF"
     }
 
-    private fun showConnected() {
-        callsignInput.isEnabled = false
-        searchButton.visibility = View.GONE
-        peerList.visibility = View.GONE
-        signalView.visibility = View.VISIBLE
-        chatList.visibility = View.VISIBLE
-        chatBar.visibility = View.VISIBLE
-        talkButton.isEnabled = true
-        voxButton.isEnabled = true
-        disconnectButton.isEnabled = true
-        renderSignal()
+    override fun refresh() {
+        val service = radio ?: return
+        statusView.text = service.status
+        searchButton.text = if (service.searching) "STOP SEARCH" else "SEARCH"
+        peerLabels.clear()
+        service.peers.forEach { peerLabels.add("${it.name}\nTap to connect") }
+        peerAdapter.notifyDataSetChanged()
+        if (messages != service.messages) {
+            messages.clear()
+            messages.addAll(service.messages)
+            chatAdapter.notifyDataSetChanged()
+            if (messages.isNotEmpty()) chatList.setSelection(messages.size - 1)
+        }
+        val connected = service.connected
+        callsignInput.isEnabled = !connected && !service.searching
+        searchButton.visibility = if (connected) View.GONE else View.VISIBLE
+        peerList.visibility = if (connected) View.GONE else View.VISIBLE
+        signalView.visibility = if (connected) View.VISIBLE else View.GONE
+        chatList.visibility = if (connected) View.VISIBLE else View.GONE
+        chatBar.visibility = if (connected) View.VISIBLE else View.GONE
+        talkButton.isEnabled = connected
+        voxButton.isEnabled = connected
+        videoButton.isEnabled = connected
+        disconnectButton.isEnabled = connected
+        talkButton.text = if (service.transmitting) "TRANSMITTING..." else "HOLD TO TALK"
+        voxButton.text = if (service.vox) "VOX: ON" else "VOX: OFF"
+        if (connected) {
+            signalView.text = signalText(service)
+        } else {
+            stopVideo()
+            handler.removeCallbacks(hideRemote)
+            hideRemote.run()
+        }
     }
 
-    private fun renderSignal() {
+    private fun signalText(service: RadioService): String {
+        val percent = service.signalPercent
         val bars = when {
-            signalPercent >= 90 -> 4
-            signalPercent >= 70 -> 3
-            signalPercent >= 40 -> 2
-            signalPercent > 0 -> 1
+            percent >= 90 -> 4
+            percent >= 70 -> 3
+            percent >= 40 -> 2
+            percent > 0 -> 1
             else -> 0
         }
         val word = when (bars) {
@@ -276,139 +326,33 @@ class MainActivity : Activity(), RadioLink.Listener {
             1 -> "POOR"
             else -> "LOST"
         }
-        signalView.text = "LINK  ${"■".repeat(bars)}${"□".repeat(4 - bars)}  $word $signalPercent%   PING $pingMs ms\n" +
-            "DISTANCE  $distanceText"
+        val secure = if (service.secureCode.isEmpty()) "SECURING..." else "E2EE ON  CODE ${service.secureCode}"
+        return "LINK  ${"■".repeat(bars)}${"□".repeat(4 - bars)}  $word $percent%   PING ${service.pingMs} ms\n" +
+            "DISTANCE  ${service.distanceText}\n" +
+            secure
     }
 
-    private fun boostVolume() {
-        val manager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        val max = manager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-        if (manager.getStreamVolume(AudioManager.STREAM_MUSIC) < max / 2) {
-            manager.setStreamVolume(AudioManager.STREAM_MUSIC, max * 3 / 4, 0)
-        }
-    }
-
-    private fun setStatus(text: String) {
-        runOnUiThread { statusView.text = text }
-    }
-
-    override fun onState(text: String) {
-        setStatus(text)
-    }
-
-    override fun onPeerFound(id: String, name: String) {
-        peers.removeAll { it.id == id }
-        peers.add(Peer(id, name))
-        peerLabels.clear()
-        peers.forEach { peerLabels.add("${it.name}\nTap to connect") }
-        peerAdapter.notifyDataSetChanged()
-        setStatus("Found ${peers.size} radio(s). Tap one to connect.")
-        if (name == reconnectTo && callsign() < name) link.connect(id)
-    }
-
-    override fun onPeerLost(id: String) {
-        peers.removeAll { it.id == id }
-        peerLabels.clear()
-        peers.forEach { peerLabels.add("${it.name}\nTap to connect") }
-        peerAdapter.notifyDataSetChanged()
-    }
-
-    override fun onConnectionRequest(id: String, name: String) {
-        if (name == reconnectTo) {
-            link.accept(id)
-            return
-        }
+    override fun onIncoming(id: String, name: String) {
         request?.dismiss()
         request = AlertDialog.Builder(this)
             .setTitle("Incoming radio")
             .setMessage("$name wants to connect")
             .setCancelable(false)
-            .setPositiveButton("Accept") { _, _ -> link.accept(id) }
-            .setNegativeButton("Reject") { _, _ -> link.reject(id) }
+            .setPositiveButton("Accept") { _, _ -> radio?.accept(id) }
+            .setNegativeButton("Reject") { _, _ -> radio?.reject(id) }
             .show()
     }
 
-    override fun onConnected(name: String) {
-        request?.dismiss()
-        searching = false
-        searchButton.text = "SEARCH"
-        peerName = name
-        reconnectTo = null
-        signalPercent = 100
-        pingMs = 0
-        distanceText = "measuring..."
-        boostVolume()
-        val adapter = bluetooth
-        if (adapter != null) {
-            proximity = Proximity(adapter) { meters ->
-                distanceText = when {
-                    meters == null -> "far / out of Bluetooth range"
-                    meters < 1.0 -> "under 1 m (approx)"
-                    else -> "~${meters.roundToInt()} m (approx)"
-                }
-                renderSignal()
-            }.also {
-                it.start()
-                link.sendHello(it.token)
-            }
-        }
-        audio.start(
-            onFrame = { link.sendAudio(it) },
-            onTalk = { talking ->
-                link.sendTalk(talking)
-                runOnUiThread { talkButton.text = if (talking) "TRANSMITTING..." else "HOLD TO TALK" }
-            }
-        )
-        setStatus("Connected to $peerName. Channel open.")
-        showConnected()
+    override fun onVideo(frame: Bitmap) {
+        remoteView.setImageBitmap(frame)
+        remoteView.visibility = View.VISIBLE
+        videoPanel.visibility = View.VISIBLE
+        handler.removeCallbacks(hideRemote)
+        handler.postDelayed(hideRemote, 2500)
     }
 
-    override fun onDisconnected() {
-        val wasConnected = peerName.isNotEmpty()
-        audio.stop()
-        proximity?.stop()
-        proximity = null
-        showIdle()
-        if (wasConnected && !closedByUser) reconnectTo = peerName
-        closedByUser = false
-        peerName = ""
-        if (reconnectTo != null) {
-            startSearch()
-            setStatus("Link lost with $reconnectTo. Reconnecting...")
-        } else {
-            setStatus("Disconnected. Press SEARCH to find radios.")
-        }
-    }
-
-    override fun onAudio(data: ByteArray, offset: Int, length: Int) {
-        audio.receive(data, offset, length)
-    }
-
-    override fun onText(text: String) {
-        addMessage(peerName, text)
-    }
-
-    override fun onTalkState(talking: Boolean) {
-        audio.remoteTalk(talking)
-        setStatus(if (talking) "$peerName is talking..." else "Connected to $peerName. Channel open.")
-    }
-
-    override fun onHello(token: Int, name: String) {
-        proximity?.peerToken = token
-        if (name.isNotEmpty()) peerName = name
-    }
-
-    override fun onQuality(rttMs: Int, percent: Int) {
-        signalPercent = percent
-        pingMs = rttMs
-        renderSignal()
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        request?.dismiss()
-        audio.stop()
-        proximity?.stop()
-        link.shutdown()
+    private companion object {
+        const val PERMISSION_REQUEST = 1
+        const val CAMERA_REQUEST = 2
     }
 }
