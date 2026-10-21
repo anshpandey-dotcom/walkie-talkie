@@ -11,8 +11,8 @@ android {
         applicationId = "com.fmc.walkie"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "2.0"
     }
 
     buildTypes {
@@ -29,4 +29,8 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+}
+
+dependencies {
+    implementation("com.google.android.gms:play-services-nearby:19.3.0")
 }
