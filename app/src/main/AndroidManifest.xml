@@ -35,7 +35,7 @@
     <application
         android:allowBackup="false"
         android:icon="@drawable/ic_launcher"
-        android:label="Secure"
+        android:label="Sentry"
         android:theme="@android:style/Theme.Material.NoActionBar">
 
         <activity
