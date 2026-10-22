@@ -25,10 +25,12 @@ import android.view.ScaleGestureDetector
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ListView
 import android.widget.TextView
 
 @SuppressLint("MissingPermission", "SetTextI18n", "ClickableViewAccessibility")
@@ -45,6 +47,10 @@ class MonitorActivity : Activity(), LinkService.Ui, ServiceConnection {
     private lateinit var muteButton: Button
     private lateinit var gainButton: Button
     private lateinit var detectButton: Button
+    private lateinit var lockButton: Button
+    private lateinit var savedList: ListView
+    private lateinit var savedAdapter: ArrayAdapter<String>
+    private val savedCodes = ArrayList<String>()
     private var service: LinkService? = null
     private var unlocked = false
     private var gainStep = 1
@@ -73,6 +79,21 @@ class MonitorActivity : Activity(), LinkService.Ui, ServiceConnection {
         muteButton = findViewById(R.id.mute)
         gainButton = findViewById(R.id.gain)
         detectButton = findViewById(R.id.detect)
+        lockButton = findViewById(R.id.lock)
+        savedList = findViewById(R.id.saved)
+
+        savedAdapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, savedCodes)
+        savedList.adapter = savedAdapter
+        loadSaved()
+        savedList.setOnItemClickListener { _, _, position, _ ->
+            codeInput.setText(savedCodes.getOrNull(position) ?: "")
+            connect()
+        }
+        updateLockLabel()
+        lockButton.setOnClickListener { toggleLock() }
+        findViewById<Button>(R.id.clips).setOnClickListener {
+            startActivity(Intent(this, ClipsActivity::class.java))
+        }
 
         codeInput.setText(getSharedPreferences("mon", Context.MODE_PRIVATE).getString("code", "") ?: "")
         findViewById<Button>(R.id.connect).setOnClickListener { connect() }
@@ -221,7 +242,12 @@ class MonitorActivity : Activity(), LinkService.Ui, ServiceConnection {
             return
         }
         if (!ready()) return
-        getSharedPreferences("mon", Context.MODE_PRIVATE).edit().putString("code", code).apply()
+        val prefs = getSharedPreferences("mon", Context.MODE_PRIVATE)
+        prefs.edit().putString("code", code).apply()
+        val codes = LinkedHashSet(prefs.getStringSet("cameras", emptySet()) ?: emptySet())
+        codes.add(code)
+        prefs.edit().putStringSet("cameras", codes).apply()
+        loadSaved()
         val intent = Intent(this, LinkService::class.java)
             .putExtra(LinkService.EXTRA_CAMERA, false)
             .putExtra(LinkService.EXTRA_CODE, code)
@@ -337,5 +363,25 @@ class MonitorActivity : Activity(), LinkService.Ui, ServiceConnection {
             videoView.setImageBitmap(frame)
             videoView.visibility = View.VISIBLE
         }
+    }
+
+    private fun loadSaved() {
+        val codes = getSharedPreferences("mon", Context.MODE_PRIVATE).getStringSet("cameras", emptySet()) ?: emptySet()
+        savedCodes.clear()
+        savedCodes.addAll(codes.sorted())
+        savedAdapter.notifyDataSetChanged()
+    }
+
+    private fun toggleLock() {
+        if (lock.isEnabled) {
+            lock.disable()
+            updateLockLabel()
+        } else {
+            lock.enable { updateLockLabel() }
+        }
+    }
+
+    private fun updateLockLabel() {
+        lockButton.text = if (lock.isEnabled) "APP LOCK: ON" else "APP LOCK: OFF"
     }
 }

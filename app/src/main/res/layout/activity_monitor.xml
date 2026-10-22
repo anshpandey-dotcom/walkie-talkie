@@ -49,6 +49,39 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:text="CONNECT" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="SAVED CAMERAS"
+                android:textColor="#B0BEC5"
+                android:textSize="12sp" />
+
+            <ListView
+                android:id="@+id/saved"
+                android:layout_width="match_parent"
+                android:layout_height="140dp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/clips"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="SAVED VIDEOS" />
+
+                <Button
+                    android:id="@+id/lock"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="APP LOCK: OFF" />
+            </LinearLayout>
         </LinearLayout>
 
         <TextView

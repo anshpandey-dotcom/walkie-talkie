@@ -77,6 +77,13 @@
             android:layout_marginTop="8dp"
             android:text="BLACK SCREEN (SAVE BATTERY)" />
 
+        <Button
+            android:id="@+id/lock"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="APP LOCK: OFF" />
+
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

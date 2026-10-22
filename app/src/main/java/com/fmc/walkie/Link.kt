@@ -144,6 +144,7 @@ class Link(context: Context, private val asCamera: Boolean, private val listener
     fun start(pairingCode: String) {
         code = pairingCode
         stop()
+        client.stopAllEndpoints()
         if (asCamera) {
             client.startAdvertising(code, serviceId, lifecycle, AdvertisingOptions.Builder().setStrategy(strategy).build())
                 .addOnFailureListener { listener.onState("Could not go live: ${it.message}") }

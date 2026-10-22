@@ -3,6 +3,7 @@ package com.fmc.walkie
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.AlertDialog
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
 import android.content.ComponentName
@@ -30,8 +31,10 @@ class CameraActivity : Activity(), LinkService.Ui, ServiceConnection {
     private lateinit var toggleButton: Button
     private lateinit var detectButton: Button
     private lateinit var blackButton: Button
+    private lateinit var lockButton: Button
     private lateinit var blackout: View
     private var service: LinkService? = null
+    private var request: AlertDialog? = null
     private var unlocked = false
     private var running = false
 
@@ -44,7 +47,10 @@ class CameraActivity : Activity(), LinkService.Ui, ServiceConnection {
         toggleButton = findViewById(R.id.toggle)
         detectButton = findViewById(R.id.detect)
         blackButton = findViewById(R.id.black)
+        lockButton = findViewById(R.id.lock)
         blackout = findViewById(R.id.blackout)
+        updateLockLabel()
+        lockButton.setOnClickListener { toggleLock() }
 
         codeInput.setText(getSharedPreferences("cam", Context.MODE_PRIVATE).getString("code", "") ?: "")
         toggleButton.setOnClickListener { if (running) stop() else start() }
@@ -70,6 +76,7 @@ class CameraActivity : Activity(), LinkService.Ui, ServiceConnection {
     }
 
     override fun onStop() {
+        request?.dismiss()
         service?.ui = null
         service = null
         try {
@@ -186,5 +193,32 @@ class CameraActivity : Activity(), LinkService.Ui, ServiceConnection {
 
     override fun onScreen(black: Boolean) {
         runOnUiThread { setBlack(black) }
+    }
+
+    override fun onIncoming() {
+        runOnUiThread {
+            val svc = service ?: return@runOnUiThread
+            request?.dismiss()
+            request = AlertDialog.Builder(this)
+                .setTitle("Connection request")
+                .setMessage("A monitor wants to view this camera. Allow?")
+                .setCancelable(false)
+                .setPositiveButton("Accept") { _, _ -> svc.acceptRequest() }
+                .setNegativeButton("Reject") { _, _ -> svc.rejectRequest() }
+                .show()
+        }
+    }
+
+    private fun toggleLock() {
+        if (lock.isEnabled) {
+            lock.disable()
+            updateLockLabel()
+        } else {
+            lock.enable { updateLockLabel() }
+        }
+    }
+
+    private fun updateLockLabel() {
+        lockButton.text = if (lock.isEnabled) "APP LOCK: ON" else "APP LOCK: OFF"
     }
 }

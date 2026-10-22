@@ -23,12 +23,32 @@ class Lock(private val activity: Activity) {
     private var dialog: Dialog? = null
     private var firstPattern: String? = null
 
-    val isSet: Boolean
-        get() = prefs.contains("secret")
+    val isEnabled: Boolean
+        get() = prefs.getBoolean("enabled", false) && prefs.contains("secret")
 
     fun gate(onUnlocked: () -> Unit) {
+        if (!isEnabled || sessionUnlocked) {
+            onUnlocked()
+            return
+        }
         if (dialog?.isShowing == true) return
-        if (isSet) prompt(onUnlocked) else setup(onUnlocked)
+        prompt {
+            sessionUnlocked = true
+            onUnlocked()
+        }
+    }
+
+    fun enable(onDone: () -> Unit) {
+        setup {
+            prefs.edit().putBoolean("enabled", true).apply()
+            sessionUnlocked = true
+            onDone()
+        }
+    }
+
+    fun disable() {
+        prefs.edit().remove("enabled").remove("secret").remove("salt").apply()
+        sessionUnlocked = true
     }
 
     fun dismiss() {
@@ -167,5 +187,10 @@ class Lock(private val activity: Activity) {
     @Suppress("unused")
     private fun pinField(): EditText {
         return EditText(activity).apply { inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD }
+    }
+
+    companion object {
+        @Volatile
+        private var sessionUnlocked = false
     }
 }

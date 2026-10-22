@@ -36,6 +36,7 @@ class LinkService : Service(), Link.Listener {
         fun refresh() {}
         fun onRemoteFrame(frame: Bitmap) {}
         fun onScreen(black: Boolean) {}
+        fun onIncoming() {}
     }
 
     inner class LocalBinder : Binder() {
@@ -92,6 +93,9 @@ class LinkService : Service(), Link.Listener {
         private set
     var lastAlertAt = 0L
         private set
+    var hasRequest = false
+        private set
+    private var pendingId: String? = null
     var clipCount = 0
         private set
 
@@ -113,6 +117,8 @@ class LinkService : Service(), Link.Listener {
                 return START_NOT_STICKY
             }
             ACTION_SOS -> toggleSos()
+            ACTION_ACCEPT -> acceptRequest()
+            ACTION_REJECT -> rejectRequest()
             ACTION_PANIC -> if (this::link.isInitialized) link.send(Op.COMMAND, byteArrayOf(Cmd.SOS, 1))
             else -> {
                 camera = intent?.getBooleanExtra(EXTRA_CAMERA, false) ?: camera
@@ -278,11 +284,43 @@ class LinkService : Service(), Link.Listener {
     }
 
     override fun onConnectRequest(id: String) {
+        if (getSharedPreferences("svc", Context.MODE_PRIVATE).getBoolean("trust_$code", false)) {
+            link.accept(id)
+            return
+        }
+        pendingId = id
+        hasRequest = true
+        status = "A monitor wants to connect. Accept?"
+        notifyRequest()
+        changed()
+        handler.post { ui?.onIncoming() }
+    }
+
+    fun acceptRequest() {
+        val id = pendingId ?: return
+        pendingId = null
+        hasRequest = false
+        notifier.cancel(NOTIFY_REQUEST)
+        getSharedPreferences("svc", Context.MODE_PRIVATE).edit().putBoolean("trust_$code", true).apply()
         link.accept(id)
+        changed()
+    }
+
+    fun rejectRequest() {
+        val id = pendingId ?: return
+        pendingId = null
+        hasRequest = false
+        notifier.cancel(NOTIFY_REQUEST)
+        link.reject(id)
+        status = "Request rejected."
+        changed()
     }
 
     override fun onConnected() {
         connected = true
+        hasRequest = false
+        pendingId = null
+        notifier.cancel(NOTIFY_REQUEST)
         secureCode = ""
         signalPercent = 100
         status = "Linked. Securing channel..."
@@ -571,6 +609,42 @@ class LinkService : Service(), Link.Listener {
     }
 
     @Suppress("DEPRECATION")
+    private fun notifyRequest() {
+        val open = PendingIntent.getActivity(
+            this,
+            3,
+            Intent(this, activityClass()).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            PendingIntent.FLAG_IMMUTABLE
+        )
+        val accept = PendingIntent.getService(
+            this,
+            4,
+            Intent(this, LinkService::class.java).setAction(ACTION_ACCEPT),
+            PendingIntent.FLAG_IMMUTABLE
+        )
+        val reject = PendingIntent.getService(
+            this,
+            5,
+            Intent(this, LinkService::class.java).setAction(ACTION_REJECT),
+            PendingIntent.FLAG_IMMUTABLE
+        )
+        val icon = Icon.createWithResource(this, R.drawable.ic_radio)
+        notifier.notify(
+            NOTIFY_REQUEST,
+            newBuilder(ALERTS).setSmallIcon(R.drawable.ic_radio)
+                .setContentTitle("Connection request")
+                .setContentText("A monitor wants to view this camera")
+                .setCategory(Notification.CATEGORY_CALL)
+                .setPriority(Notification.PRIORITY_HIGH)
+                .setAutoCancel(true)
+                .setContentIntent(open)
+                .addAction(Notification.Action.Builder(icon, "ACCEPT", accept).build())
+                .addAction(Notification.Action.Builder(icon, "REJECT", reject).build())
+                .build()
+        )
+    }
+
+    @Suppress("DEPRECATION")
     private fun notifyAlert(text: String) {
         val open = PendingIntent.getActivity(
             this,
@@ -598,10 +672,13 @@ class LinkService : Service(), Link.Listener {
         const val ACTION_STOP = "com.fmc.walkie.STOP"
         const val ACTION_SOS = "com.fmc.walkie.SOS"
         const val ACTION_PANIC = "com.fmc.walkie.PANIC"
+        const val ACTION_ACCEPT = "com.fmc.walkie.ACCEPT"
+        const val ACTION_REJECT = "com.fmc.walkie.REJECT"
         private const val CHANNEL = "secure_link"
         private const val ALERTS = "secure_alerts"
         private const val NOTIFY = 1
         private const val NOTIFY_ALERT = 2
+        private const val NOTIFY_REQUEST = 4
         private const val SUB_TOKEN: Byte = 1
     }
 }
