@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="SentryButton" parent="@android:style/Widget.Material.Button">
+        <item name="android:background">@drawable/btn</item>
+        <item name="android:textColor">#E8F5E9</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:padding">12dp</item>
+        <item name="android:layout_margin">4dp</item>
+    </style>
+
+    <style name="SentryTheme" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:colorAccent">#4CAF50</item>
+        <item name="android:buttonStyle">@style/SentryButton</item>
+        <item name="android:editTextColor">#FFFFFF</item>
+        <item name="android:textColorHint">#607D8B</item>
+    </style>
+</resources>
