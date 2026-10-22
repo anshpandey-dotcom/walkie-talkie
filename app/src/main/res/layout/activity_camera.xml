@@ -30,7 +30,27 @@
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="PAIRING CODE"
+            android:text="CAMERA NAME"
+            android:textColor="#B0BEC5"
+            android:textSize="12sp" />
+
+        <EditText
+            android:id="@+id/camname"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="e.g. Gate, Door, Hall"
+            android:importantForAutofill="no"
+            android:inputType="text"
+            android:maxLength="16"
+            android:singleLine="true"
+            android:textColor="#FFFFFF"
+            android:textSize="20sp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="PAIRING CODE (give this, or the QR, to the monitor)"
             android:textColor="#B0BEC5"
             android:textSize="12sp" />
 
@@ -45,6 +65,15 @@
             android:maxLength="6"
             android:textColor="#FFFFFF"
             android:textSize="28sp" />
+
+        <ImageView
+            android:id="@+id/qr"
+            android:layout_width="180dp"
+            android:layout_height="180dp"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginTop="8dp"
+            android:contentDescription="Pairing QR"
+            android:visibility="gone" />
 
         <Button
             android:id="@+id/toggle"

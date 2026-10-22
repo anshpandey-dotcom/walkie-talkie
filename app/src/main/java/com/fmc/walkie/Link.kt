@@ -45,7 +45,7 @@ class Link(context: Context, private val asCamera: Boolean, private val listener
 
     interface Listener {
         fun onState(text: String)
-        fun onFound(id: String)
+        fun onFound(id: String, name: String)
         fun onConnectRequest(id: String)
         fun onConnected()
         fun onSecure(code: String)
@@ -61,6 +61,7 @@ class Link(context: Context, private val asCamera: Boolean, private val listener
     private val answered = BooleanArray(8)
     private val inFlight = HashSet<Long>()
     private var code = ""
+    private var displayName = ""
     private var pingSeq = 0
     private var rtt = 0
 
@@ -131,27 +132,40 @@ class Link(context: Context, private val asCamera: Boolean, private val listener
 
     private val discovery = object : EndpointDiscoveryCallback() {
         override fun onEndpointFound(endpointId: String, info: DiscoveredEndpointInfo) {
-            if (info.serviceId == serviceId && info.endpointName == code) {
-                listener.onFound(endpointId)
-                client.requestConnection(code, endpointId, lifecycle)
-                    .addOnFailureListener { listener.onState("Could not reach the camera: ${it.message}") }
-            }
+            if (info.serviceId != serviceId) return
+            val name = info.endpointName
+            if (name.substringBefore('~') != code) return
+            listener.onFound(endpointId, name.substringAfter('~', ""))
+            client.requestConnection(code, endpointId, lifecycle)
+                .addOnFailureListener { listener.onState("Could not reach the camera: ${it.message}") }
         }
 
         override fun onEndpointLost(endpointId: String) = Unit
     }
 
-    fun start(pairingCode: String) {
+    fun start(pairingCode: String, name: String = "") {
         code = pairingCode
+        displayName = name
         stop()
         client.stopAllEndpoints()
-        if (asCamera) {
-            client.startAdvertising(code, serviceId, lifecycle, AdvertisingOptions.Builder().setStrategy(strategy).build())
-                .addOnFailureListener { listener.onState("Could not go live: ${it.message}") }
-        } else {
-            client.startDiscovery(serviceId, discovery, DiscoveryOptions.Builder().setStrategy(strategy).build())
-                .addOnFailureListener { listener.onState("Could not scan: ${it.message}") }
-        }
+        if (asCamera) advertise() else discover()
+    }
+
+    private fun advertise() {
+        val label = if (displayName.isEmpty()) code else "$code~${displayName.replace('~', ' ')}"
+        client.startAdvertising(label, serviceId, lifecycle, AdvertisingOptions.Builder().setStrategy(strategy).build())
+            .addOnFailureListener {
+                listener.onState("Could not go live: ${it.message}. Retrying...")
+                handler.postDelayed({ if (peer == null) advertise() }, 3000)
+            }
+    }
+
+    private fun discover() {
+        client.startDiscovery(serviceId, discovery, DiscoveryOptions.Builder().setStrategy(strategy).build())
+            .addOnFailureListener {
+                listener.onState("Could not scan: ${it.message}. Retrying...")
+                handler.postDelayed({ if (peer == null) discover() }, 3000)
+            }
     }
 
     fun stop() {

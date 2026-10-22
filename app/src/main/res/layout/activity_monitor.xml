@@ -44,11 +44,25 @@
                 android:textColor="#FFFFFF"
                 android:textSize="28sp" />
 
-            <Button
-                android:id="@+id/connect"
+            <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="CONNECT" />
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/connect"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="CONNECT" />
+
+                <Button
+                    android:id="@+id/scan"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="SCAN QR" />
+            </LinearLayout>
 
             <TextView
                 android:layout_width="match_parent"

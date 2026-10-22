@@ -14,6 +14,7 @@ class CameraRig(private val onFrame: (ByteArray, Int, Int, Int, Int, Int) -> Uni
 
     private val dummy = SurfaceTexture(10)
     private val grid = 8
+    var previewSurface: SurfaceTexture? = null
     private var previous: IntArray? = null
     private var camera: Camera? = null
     private var facing = Camera.CameraInfo.CAMERA_FACING_BACK
@@ -102,7 +103,13 @@ class CameraRig(private val onFrame: (ByteArray, Int, Int, Int, Int, Int) -> Uni
             width = opened.parameters.previewSize.width
             height = opened.parameters.previewSize.height
             rotation = info.orientation
-            opened.setPreviewTexture(dummy)
+            val surface = previewSurface
+            if (surface != null) {
+                opened.setDisplayOrientation(if (facing == Camera.CameraInfo.CAMERA_FACING_FRONT) (360 - info.orientation) % 360 else info.orientation)
+                opened.setPreviewTexture(surface)
+            } else {
+                opened.setPreviewTexture(dummy)
+            }
             opened.setPreviewCallback { data, _ -> frame(data) }
             opened.startPreview()
             camera = opened

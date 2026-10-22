@@ -59,6 +59,12 @@
             android:exported="false"
             android:label="Saved Videos" />
 
+        <activity
+            android:name="com.fmc.walkie.ScanActivity"
+            android:exported="false"
+            android:label="Scan QR"
+            android:screenOrientation="portrait" />
+
         <service
             android:name="com.fmc.walkie.LinkService"
             android:exported="false"

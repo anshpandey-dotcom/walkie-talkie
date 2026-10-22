@@ -27,6 +27,8 @@ class CameraActivity : Activity(), LinkService.Ui, ServiceConnection {
 
     private lateinit var lock: Lock
     private lateinit var codeInput: EditText
+    private lateinit var nameInput: EditText
+    private lateinit var qrImage: android.widget.ImageView
     private lateinit var statusView: TextView
     private lateinit var toggleButton: Button
     private lateinit var detectButton: Button
@@ -43,6 +45,8 @@ class CameraActivity : Activity(), LinkService.Ui, ServiceConnection {
         setContentView(R.layout.activity_camera)
         lock = Lock(this)
         codeInput = findViewById(R.id.code)
+        nameInput = findViewById(R.id.camname)
+        qrImage = findViewById(R.id.qr)
         statusView = findViewById(R.id.status)
         toggleButton = findViewById(R.id.toggle)
         detectButton = findViewById(R.id.detect)
@@ -52,7 +56,11 @@ class CameraActivity : Activity(), LinkService.Ui, ServiceConnection {
         updateLockLabel()
         lockButton.setOnClickListener { toggleLock() }
 
-        codeInput.setText(getSharedPreferences("cam", Context.MODE_PRIVATE).getString("code", "") ?: "")
+        val prefs = getSharedPreferences("cam", Context.MODE_PRIVATE)
+        val savedCode = prefs.getString("code", null) ?: (100000..999999).random().toString()
+        codeInput.setText(savedCode)
+        nameInput.setText(prefs.getString("camname", "") ?: "")
+        renderQr()
         toggleButton.setOnClickListener { if (running) stop() else start() }
         detectButton.setOnClickListener {
             val svc = service ?: return@setOnClickListener
@@ -106,12 +114,16 @@ class CameraActivity : Activity(), LinkService.Ui, ServiceConnection {
             return
         }
         if (!ready()) return
-        getSharedPreferences("cam", Context.MODE_PRIVATE).edit().putString("code", code).apply()
+        val name = nameInput.text.toString().trim().take(16)
+        getSharedPreferences("cam", Context.MODE_PRIVATE).edit()
+            .putString("code", code).putString("camname", name).apply()
+        renderQr()
         val intent = Intent(this, LinkService::class.java)
             .putExtra(LinkService.EXTRA_CAMERA, true)
             .putExtra(LinkService.EXTRA_CODE, code)
+            .putExtra(LinkService.EXTRA_NAME, name)
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent) else startService(intent)
-        service?.begin(true, code)
+        service?.begin(true, code, name)
         running = true
         refresh()
     }
@@ -220,5 +232,20 @@ class CameraActivity : Activity(), LinkService.Ui, ServiceConnection {
 
     private fun updateLockLabel() {
         lockButton.text = if (lock.isEnabled) "APP LOCK: ON" else "APP LOCK: OFF"
+    }
+
+    private fun renderQr() {
+        val code = codeInput.text.toString()
+        if (code.length != 6) {
+            qrImage.visibility = View.GONE
+            return
+        }
+        val name = nameInput.text.toString().trim().take(16)
+        try {
+            qrImage.setImageBitmap(Qr.encode("SENTRY:$code:$name", 480))
+            qrImage.visibility = View.VISIBLE
+        } catch (e: Exception) {
+            qrImage.visibility = View.GONE
+        }
     }
 }

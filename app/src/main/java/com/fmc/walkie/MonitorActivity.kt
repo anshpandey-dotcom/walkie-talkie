@@ -51,6 +51,7 @@ class MonitorActivity : Activity(), LinkService.Ui, ServiceConnection {
     private lateinit var savedList: ListView
     private lateinit var savedAdapter: ArrayAdapter<String>
     private val savedCodes = ArrayList<String>()
+    private val savedLabels = ArrayList<String>()
     private var service: LinkService? = null
     private var unlocked = false
     private var gainStep = 1
@@ -82,7 +83,7 @@ class MonitorActivity : Activity(), LinkService.Ui, ServiceConnection {
         lockButton = findViewById(R.id.lock)
         savedList = findViewById(R.id.saved)
 
-        savedAdapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, savedCodes)
+        savedAdapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, savedLabels)
         savedList.adapter = savedAdapter
         loadSaved()
         savedList.setOnItemClickListener { _, _, position, _ ->
@@ -93,6 +94,13 @@ class MonitorActivity : Activity(), LinkService.Ui, ServiceConnection {
         lockButton.setOnClickListener { toggleLock() }
         findViewById<Button>(R.id.clips).setOnClickListener {
             startActivity(Intent(this, ClipsActivity::class.java))
+        }
+        findViewById<Button>(R.id.scan).setOnClickListener {
+            if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                startActivityForResult(Intent(this, ScanActivity::class.java), SCAN_REQUEST)
+            } else {
+                requestPermissions(arrayOf(Manifest.permission.CAMERA), CAMERA_REQUEST)
+            }
         }
 
         codeInput.setText(getSharedPreferences("mon", Context.MODE_PRIVATE).getString("code", "") ?: "")
@@ -302,8 +310,30 @@ class MonitorActivity : Activity(), LinkService.Ui, ServiceConnection {
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) connect()
-        else statusView.text = "Allow Mic and Location, then press CONNECT"
+        val ok = grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+        if (requestCode == CAMERA_REQUEST) {
+            if (ok) startActivityForResult(Intent(this, ScanActivity::class.java), SCAN_REQUEST)
+            else statusView.text = "Camera needed to scan the QR"
+            return
+        }
+        if (ok) connect() else statusView.text = "Allow Mic and Location, then press CONNECT"
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == SCAN_REQUEST && resultCode == RESULT_OK) {
+            val code = data?.getStringExtra("code") ?: return
+            codeInput.setText(code)
+            data.getStringExtra("name")?.let {
+                if (it.isNotEmpty()) getSharedPreferences("mon", Context.MODE_PRIVATE).edit().putString("name_$code", it).apply()
+            }
+            connect()
+        }
+    }
+
+    private companion object {
+        const val CAMERA_REQUEST = 2
+        const val SCAN_REQUEST = 3
     }
 
     override fun refresh() {
@@ -366,9 +396,15 @@ class MonitorActivity : Activity(), LinkService.Ui, ServiceConnection {
     }
 
     private fun loadSaved() {
-        val codes = getSharedPreferences("mon", Context.MODE_PRIVATE).getStringSet("cameras", emptySet()) ?: emptySet()
+        val prefs = getSharedPreferences("mon", Context.MODE_PRIVATE)
+        val codes = (prefs.getStringSet("cameras", emptySet()) ?: emptySet()).sorted()
         savedCodes.clear()
-        savedCodes.addAll(codes.sorted())
+        savedLabels.clear()
+        codes.forEach { code ->
+            savedCodes.add(code)
+            val name = prefs.getString("name_$code", null)
+            savedLabels.add(if (name.isNullOrEmpty()) "Camera $code" else "$name  ·  $code")
+        }
         savedAdapter.notifyDataSetChanged()
     }
 

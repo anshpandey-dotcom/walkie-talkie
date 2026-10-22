@@ -57,6 +57,8 @@ class LinkService : Service(), Link.Listener {
     private var foreground = false
     private var camera = false
     private var started = false
+    private var stopping = false
+    private var cameraName = ""
 
     private var baseline = 1200.0
     private var triggerUntil = 0L
@@ -123,8 +125,9 @@ class LinkService : Service(), Link.Listener {
             else -> {
                 camera = intent?.getBooleanExtra(EXTRA_CAMERA, false) ?: camera
                 code = intent?.getStringExtra(EXTRA_CODE) ?: code
+                cameraName = intent?.getStringExtra(EXTRA_NAME) ?: cameraName
                 goForeground()
-                if (code.length == 6) begin(camera, code)
+                if (code.length == 6) begin(camera, code, cameraName)
                 return START_NOT_STICKY
             }
         }
@@ -143,16 +146,18 @@ class LinkService : Service(), Link.Listener {
         super.onDestroy()
     }
 
-    fun begin(asCamera: Boolean, pairingCode: String) {
+    fun begin(asCamera: Boolean, pairingCode: String, name: String = "") {
         if (started) return
         started = true
+        stopping = false
         camera = asCamera
         code = pairingCode
+        cameraName = name
         if (!this::link.isInitialized) link = Link(this, asCamera, this)
         clipDir = File(getExternalFilesDir(null), "clips").apply { mkdirs() }
         clipCount = clipDir?.listFiles()?.count { it.isDirectory } ?: 0
         goForeground()
-        link.start(pairingCode)
+        link.start(pairingCode, name)
         status = if (asCamera) "Camera live. Code $pairingCode. Waiting for monitor." else "Searching for camera with code $pairingCode..."
         if (asCamera) {
             audio.transmit = false
@@ -164,6 +169,7 @@ class LinkService : Service(), Link.Listener {
     }
 
     fun shutdown() {
+        stopping = true
         audio.stop()
         rig?.stop()
         rig = null
@@ -278,8 +284,11 @@ class LinkService : Service(), Link.Listener {
         changed()
     }
 
-    override fun onFound(id: String) {
-        status = "Camera found. Connecting..."
+    override fun onFound(id: String, name: String) {
+        if (name.isNotEmpty()) {
+            getSharedPreferences("mon", Context.MODE_PRIVATE).edit().putString("name_$code", name).apply()
+        }
+        status = if (name.isEmpty()) "Camera found. Connecting..." else "Found \"$name\". Connecting..."
         changed()
     }
 
@@ -357,10 +366,14 @@ class LinkService : Service(), Link.Listener {
         secureCode = ""
         proximity?.stop()
         proximity = null
+        if (stopping) {
+            changed()
+            return
+        }
         if (camera) {
             ensureCamera(false)
             status = "Monitor disconnected. Camera live, waiting."
-            link.start(code)
+            link.start(code, cameraName)
         } else {
             audio.stop()
             if (started) {
@@ -669,6 +682,7 @@ class LinkService : Service(), Link.Listener {
     companion object {
         const val EXTRA_CAMERA = "camera"
         const val EXTRA_CODE = "code"
+        const val EXTRA_NAME = "name"
         const val ACTION_STOP = "com.fmc.walkie.STOP"
         const val ACTION_SOS = "com.fmc.walkie.SOS"
         const val ACTION_PANIC = "com.fmc.walkie.PANIC"
