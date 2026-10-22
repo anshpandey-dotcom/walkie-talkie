@@ -38,6 +38,7 @@ object Cmd {
     const val PHOTO: Byte = 8
     const val DETECT: Byte = 9
     const val RECORD: Byte = 10
+    const val TALK: Byte = 11
 }
 
 class Link(context: Context, private val asCamera: Boolean, private val listener: Listener) {

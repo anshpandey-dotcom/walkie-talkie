@@ -19,8 +19,11 @@ import android.os.Bundle
 import android.os.IBinder
 import android.provider.Settings
 import android.text.InputType
+import android.view.GestureDetector
 import android.view.MotionEvent
+import android.view.ScaleGestureDetector
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.EditText
@@ -46,6 +49,12 @@ class MonitorActivity : Activity(), LinkService.Ui, ServiceConnection {
     private var unlocked = false
     private var gainStep = 1
     private var detectOn = true
+    private var camBlack = false
+    private var fullscreen = false
+    private var scaleFactor = 1f
+    private var videoBaseHeight = 0
+    private lateinit var scaleDetector: ScaleGestureDetector
+    private lateinit var tapDetector: GestureDetector
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -95,7 +104,40 @@ class MonitorActivity : Activity(), LinkService.Ui, ServiceConnection {
         }
         findViewById<Button>(R.id.sos).setOnClickListener { command(Cmd.SOS, 1) }
         findViewById<Button>(R.id.speak).setOnClickListener { speakDialog() }
+        findViewById<Button>(R.id.fullscreen).setOnClickListener { setFullscreen(!fullscreen) }
+        findViewById<Button>(R.id.camscreen).setOnClickListener {
+            camBlack = !camBlack
+            service?.setCameraScreen(camBlack)
+            (it as Button).text = if (camBlack) "CAM SCREEN ON" else "CAM SCREEN OFF"
+        }
         findViewById<Button>(R.id.hangup).setOnClickListener { service?.shutdown() }
+
+        scaleDetector = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            override fun onScale(detector: ScaleGestureDetector): Boolean {
+                scaleFactor = (scaleFactor * detector.scaleFactor).coerceIn(1f, 5f)
+                videoView.scaleX = scaleFactor
+                videoView.scaleY = scaleFactor
+                return true
+            }
+        })
+        tapDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+            override fun onDoubleTap(e: MotionEvent): Boolean {
+                scaleFactor = 1f
+                videoView.scaleX = 1f
+                videoView.scaleY = 1f
+                return true
+            }
+
+            override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+                if (fullscreen) setFullscreen(false)
+                return true
+            }
+        })
+        videoView.setOnTouchListener { _, event ->
+            scaleDetector.onTouchEvent(event)
+            tapDetector.onTouchEvent(event)
+            true
+        }
         findViewById<Button>(R.id.talk).setOnTouchListener { view, event ->
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
@@ -255,11 +297,39 @@ class MonitorActivity : Activity(), LinkService.Ui, ServiceConnection {
         }
         val secure = if (svc.secureCode.isEmpty()) "securing..." else "E2EE ${svc.secureCode}"
         statusView.text = if (connected) {
-            "LINK $bars ${svc.signalPercent}%  PING ${svc.pingMs}ms\nDISTANCE ${svc.distanceText}\n$secure" +
-                if (svc.lastAlert.isNotEmpty()) "\nLAST ALERT: ${svc.lastAlert}" else ""
+            "LINK $bars ${svc.signalPercent}%  PING ${svc.pingMs}ms\nDISTANCE ${svc.distanceText}\n$secure\nLAST MOTION: ${lastMotion(svc.lastAlertAt)}"
         } else {
             svc.status
         }
+    }
+
+    private fun lastMotion(at: Long): String {
+        if (at == 0L) return "none yet"
+        val mins = (System.currentTimeMillis() - at) / 60000
+        val clock = java.text.SimpleDateFormat("hh:mm a", java.util.Locale.getDefault()).format(java.util.Date(at))
+        return when {
+            mins <= 0L -> "just now ($clock)"
+            mins == 1L -> "1 min ago ($clock)"
+            mins < 60L -> "$mins min ago ($clock)"
+            else -> "at $clock"
+        }
+    }
+
+    private fun setFullscreen(on: Boolean) {
+        fullscreen = on
+        val params = videoView.layoutParams
+        if (on) {
+            if (videoBaseHeight == 0) videoBaseHeight = videoView.height
+            params.height = resources.displayMetrics.heightPixels
+            setup.visibility = View.GONE
+            controls.visibility = View.GONE
+            statusView.visibility = View.GONE
+        } else {
+            params.height = if (videoBaseHeight > 0) videoBaseHeight else (240 * resources.displayMetrics.density).toInt()
+            controls.visibility = View.VISIBLE
+            statusView.visibility = View.VISIBLE
+        }
+        videoView.layoutParams = params
     }
 
     override fun onRemoteFrame(frame: Bitmap) {

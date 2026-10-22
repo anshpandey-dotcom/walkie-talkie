@@ -185,6 +185,26 @@
                     android:text="SPEAK" />
             </LinearLayout>
 
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/fullscreen"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="FULLSCREEN" />
+
+                <Button
+                    android:id="@+id/camscreen"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="CAM SCREEN OFF" />
+            </LinearLayout>
+
             <Button
                 android:id="@+id/hangup"
                 android:layout_width="match_parent"

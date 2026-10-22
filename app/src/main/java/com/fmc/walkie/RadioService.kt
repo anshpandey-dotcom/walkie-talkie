@@ -62,6 +62,7 @@ class LinkService : Service(), Link.Listener {
     private var lastVideo = 0L
     private var cameraOn = false
     private var clipDir: File? = null
+    private var gainFactor = 2f
 
     var ui: Ui? = null
     var code = ""
@@ -88,6 +89,8 @@ class LinkService : Service(), Link.Listener {
     var listening = false
         private set
     var lastAlert = ""
+        private set
+    var lastAlertAt = 0L
         private set
     var clipCount = 0
         private set
@@ -148,6 +151,7 @@ class LinkService : Service(), Link.Listener {
         if (asCamera) {
             audio.transmit = false
             audio.start(onFrame = { link.sendMedia(Op.AUDIO, it) }, onLevel = { onSound(it) })
+            raiseVolume()
             acquireWake()
         }
         changed()
@@ -197,6 +201,7 @@ class LinkService : Service(), Link.Listener {
     }
 
     fun setAudioGain(value: Float) {
+        gainFactor = value
         audio.gain = value
     }
 
@@ -210,7 +215,11 @@ class LinkService : Service(), Link.Listener {
 
     fun talk(down: Boolean) {
         audio.transmit = down
-        if (down && !listening) Unit
+        command(Cmd.TALK, if (down) 1 else 0)
+    }
+
+    fun setCameraScreen(black: Boolean) {
+        command(Cmd.SCREEN, if (black) 1 else 0)
     }
 
     fun startRecording() {
@@ -277,6 +286,11 @@ class LinkService : Service(), Link.Listener {
         secureCode = ""
         signalPercent = 100
         status = "Linked. Securing channel..."
+        if (!camera) {
+            audio.gain = gainFactor
+            audio.start(onFrame = { link.sendMedia(Op.AUDIO, it) }, onLevel = {})
+            audio.transmit = false
+        }
         changed()
     }
 
@@ -297,11 +311,6 @@ class LinkService : Service(), Link.Listener {
                 link.send(Op.STATE, byteArrayOf(SUB_TOKEN) + ByteBuffer.allocate(4).putInt(it.token).array())
             }
         }
-        if (!camera) {
-            audio.gain = 2f
-            audio.start(onFrame = { link.sendMedia(Op.AUDIO, it) }, onLevel = {})
-            audio.transmit = false
-        }
         changed()
     }
 
@@ -316,7 +325,12 @@ class LinkService : Service(), Link.Listener {
             link.start(code)
         } else {
             audio.stop()
-            status = "Disconnected. Send a new pair request."
+            if (started) {
+                status = "Link dropped. Reconnecting to code $code..."
+                link.start(code)
+            } else {
+                status = "Disconnected. Send a new pair request."
+            }
         }
         changed()
     }
@@ -355,6 +369,7 @@ class LinkService : Service(), Link.Listener {
             Cmd.SCREEN -> ui?.onScreen(arg == 1)
             Cmd.PHOTO -> takePhoto()
             Cmd.DETECT -> detecting = arg == 1
+            Cmd.TALK -> if (arg == 1) raiseVolume()
             else -> Unit
         }
         changed()
@@ -368,6 +383,7 @@ class LinkService : Service(), Link.Listener {
     private fun onAlert(data: ByteArray, offset: Int, length: Int) {
         val text = String(data, offset + 1, length - 1, Charsets.UTF_8)
         lastAlert = text
+        lastAlertAt = System.currentTimeMillis()
         openClip("alert")
         notifyAlert(text)
         changed()
@@ -482,7 +498,7 @@ class LinkService : Service(), Link.Listener {
     }
 
     private fun changed() {
-        ui?.refresh()
+        handler.post { ui?.refresh() }
         if (foreground) notifier.notify(NOTIFY, buildNotification())
     }
 

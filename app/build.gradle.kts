@@ -8,11 +8,24 @@ android {
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.fmc.sentry"
         minSdk = 24
         targetSdk = 34
-        versionCode = 5
-        versionName = "5.0"
+        versionCode = 6
+        versionName = "6.0"
+    }
+
+    flavorDimensions += "role"
+    productFlavors {
+        create("camera") {
+            dimension = "role"
+            applicationId = "com.anshpandey.sentry.camera"
+            resValue("string", "app_name", "Camera")
+        }
+        create("monitor") {
+            dimension = "role"
+            applicationId = "com.anshpandey.sentry.monitor"
+            resValue("string", "app_name", "Monitor")
+        }
     }
 
     buildTypes {
