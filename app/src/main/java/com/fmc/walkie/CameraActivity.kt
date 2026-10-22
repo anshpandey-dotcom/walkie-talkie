@@ -124,6 +124,9 @@ class CameraActivity : Activity(), LinkService.Ui, ServiceConnection {
             .putExtra(LinkService.EXTRA_NAME, name)
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent) else startService(intent)
         service?.begin(true, code, name)
+        val discover = Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE)
+            .putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, 300)
+        startActivity(discover)
         running = true
         refresh()
     }

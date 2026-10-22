@@ -83,28 +83,28 @@ class MonitorActivity : Activity(), LinkService.Ui, ServiceConnection {
         lockButton = findViewById(R.id.lock)
         savedList = findViewById(R.id.saved)
 
+        codeInput.visibility = View.GONE
         savedAdapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, savedLabels)
         savedList.adapter = savedAdapter
         loadSaved()
         savedList.setOnItemClickListener { _, _, position, _ ->
-            codeInput.setText(savedCodes.getOrNull(position) ?: "")
-            connect()
+            val address = savedCodes.getOrNull(position) ?: return@setOnItemClickListener
+            val prefs = getSharedPreferences("mon", Context.MODE_PRIVATE)
+            val set = LinkedHashSet(prefs.getStringSet("devices", emptySet()) ?: emptySet())
+            set.add(address)
+            val editor = prefs.edit().putStringSet("devices", set)
+            service?.devices?.get(address)?.let { editor.putString("name_$address", it) }
+            editor.apply()
+            if (startScan()) service?.connectTo(address)
         }
         updateLockLabel()
         lockButton.setOnClickListener { toggleLock() }
         findViewById<Button>(R.id.clips).setOnClickListener {
             startActivity(Intent(this, ClipsActivity::class.java))
         }
-        findViewById<Button>(R.id.scan).setOnClickListener {
-            if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
-                startActivityForResult(Intent(this, ScanActivity::class.java), SCAN_REQUEST)
-            } else {
-                requestPermissions(arrayOf(Manifest.permission.CAMERA), CAMERA_REQUEST)
-            }
-        }
+        findViewById<Button>(R.id.scan).setOnClickListener { service?.rescan() ?: startScan() }
 
-        codeInput.setText(getSharedPreferences("mon", Context.MODE_PRIVATE).getString("code", "") ?: "")
-        findViewById<Button>(R.id.connect).setOnClickListener { connect() }
+        findViewById<Button>(R.id.connect).setOnClickListener { startScan() }
         liveButton.setOnClickListener { service?.let { it.setStreaming(!it.streaming) } }
         listenButton.setOnClickListener { service?.let { it.setListening(!it.listening) } }
         muteButton.setOnClickListener {
@@ -243,25 +243,14 @@ class MonitorActivity : Activity(), LinkService.Ui, ServiceConnection {
             .show()
     }
 
-    private fun connect() {
-        val code = codeInput.text.toString()
-        if (code.length != 6) {
-            statusView.text = "Enter the 6 digit code from the camera"
-            return
-        }
-        if (!ready()) return
-        val prefs = getSharedPreferences("mon", Context.MODE_PRIVATE)
-        prefs.edit().putString("code", code).apply()
-        val codes = LinkedHashSet(prefs.getStringSet("cameras", emptySet()) ?: emptySet())
-        codes.add(code)
-        prefs.edit().putStringSet("cameras", codes).apply()
-        loadSaved()
+    private fun startScan(): Boolean {
+        if (!ready()) return false
         val intent = Intent(this, LinkService::class.java)
             .putExtra(LinkService.EXTRA_CAMERA, false)
-            .putExtra(LinkService.EXTRA_CODE, code)
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent) else startService(intent)
-        service?.begin(false, code)
-        statusView.text = "Searching for camera..."
+        service?.begin(false, "")
+        statusView.text = "Scanning for cameras..."
+        return true
     }
 
     private fun permissions(): List<String> {
@@ -300,7 +289,7 @@ class MonitorActivity : Activity(), LinkService.Ui, ServiceConnection {
         if (Build.VERSION.SDK_INT >= 28) {
             val location = getSystemService(Context.LOCATION_SERVICE) as LocationManager
             if (!location.isLocationEnabled) {
-                statusView.text = "Turn on Location, then press CONNECT"
+                statusView.text = "Turn on Location, then press SEARCH"
                 startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
                 return false
             }
@@ -311,34 +300,13 @@ class MonitorActivity : Activity(), LinkService.Ui, ServiceConnection {
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         val ok = grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }
-        if (requestCode == CAMERA_REQUEST) {
-            if (ok) startActivityForResult(Intent(this, ScanActivity::class.java), SCAN_REQUEST)
-            else statusView.text = "Camera needed to scan the QR"
-            return
-        }
-        if (ok) connect() else statusView.text = "Allow Mic and Location, then press CONNECT"
-    }
-
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == SCAN_REQUEST && resultCode == RESULT_OK) {
-            val code = data?.getStringExtra("code") ?: return
-            codeInput.setText(code)
-            data.getStringExtra("name")?.let {
-                if (it.isNotEmpty()) getSharedPreferences("mon", Context.MODE_PRIVATE).edit().putString("name_$code", it).apply()
-            }
-            connect()
-        }
-    }
-
-    private companion object {
-        const val CAMERA_REQUEST = 2
-        const val SCAN_REQUEST = 3
+        if (ok) startScan() else statusView.text = "Allow Mic, Bluetooth and Location, then press SEARCH"
     }
 
     override fun refresh() {
         val svc = service ?: return
         val connected = svc.connected
+        if (!connected) loadSaved()
         setup.visibility = if (connected) View.GONE else View.VISIBLE
         controls.visibility = if (connected) View.VISIBLE else View.GONE
         videoView.visibility = if (connected) View.VISIBLE else View.GONE
@@ -397,13 +365,18 @@ class MonitorActivity : Activity(), LinkService.Ui, ServiceConnection {
 
     private fun loadSaved() {
         val prefs = getSharedPreferences("mon", Context.MODE_PRIVATE)
-        val codes = (prefs.getStringSet("cameras", emptySet()) ?: emptySet()).sorted()
+        val map = LinkedHashMap<String, String>()
+        service?.devices?.forEach { (address, name) -> map[address] = name }
+        (prefs.getStringSet("devices", emptySet()) ?: emptySet()).forEach { address ->
+            if (!map.containsKey(address)) map[address] = prefs.getString("name_$address", null) ?: address
+        }
         savedCodes.clear()
         savedLabels.clear()
-        codes.forEach { code ->
-            savedCodes.add(code)
-            val name = prefs.getString("name_$code", null)
-            savedLabels.add(if (name.isNullOrEmpty()) "Camera $code" else "$name  ·  $code")
+        map.forEach { (address, liveName) ->
+            savedCodes.add(address)
+            val saved = prefs.getString("name_$address", null)
+            val label = if (!saved.isNullOrEmpty()) saved else liveName
+            savedLabels.add("$label  ·  $address")
         }
         savedAdapter.notifyDataSetChanged()
     }

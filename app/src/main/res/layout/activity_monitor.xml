@@ -28,7 +28,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:paddingTop="4dp"
-                android:text="Enter the same code shown on the camera phone."
+                android:text="Press SEARCH, then tap the camera phone in the list. On the camera, press GO LIVE and allow 'make discoverable'."
                 android:textColor="#90A4AE"
                 android:textSize="13sp" />
 
@@ -54,21 +54,21 @@
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="CONNECT" />
+                    android:text="SEARCH" />
 
                 <Button
                     android:id="@+id/scan"
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="SCAN QR" />
+                    android:text="RESCAN" />
             </LinearLayout>
 
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
-                android:text="SAVED CAMERAS"
+                android:text="CAMERAS NEARBY (tap to connect)"
                 android:textColor="#B0BEC5"
                 android:textSize="12sp" />
 

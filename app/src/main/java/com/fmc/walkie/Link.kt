@@ -1,22 +1,24 @@
 package com.fmc.walkie
 
+import android.annotation.SuppressLint
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothServerSocket
+import android.bluetooth.BluetoothSocket
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
-import com.google.android.gms.nearby.Nearby
-import com.google.android.gms.nearby.connection.AdvertisingOptions
-import com.google.android.gms.nearby.connection.ConnectionInfo
-import com.google.android.gms.nearby.connection.ConnectionLifecycleCallback
-import com.google.android.gms.nearby.connection.ConnectionResolution
-import com.google.android.gms.nearby.connection.DiscoveredEndpointInfo
-import com.google.android.gms.nearby.connection.DiscoveryOptions
-import com.google.android.gms.nearby.connection.EndpointDiscoveryCallback
-import com.google.android.gms.nearby.connection.Payload
-import com.google.android.gms.nearby.connection.PayloadCallback
-import com.google.android.gms.nearby.connection.PayloadTransferUpdate
-import com.google.android.gms.nearby.connection.Strategy
+import java.io.IOException
+import java.io.InputStream
+import java.io.OutputStream
 import java.nio.ByteBuffer
+import java.util.UUID
 
 object Op {
     const val AUDIO: Byte = 1
@@ -41,7 +43,8 @@ object Cmd {
     const val TALK: Byte = 11
 }
 
-class Link(context: Context, private val asCamera: Boolean, private val listener: Listener) {
+@SuppressLint("MissingPermission")
+class Link(private val context: Context, private val asCamera: Boolean, private val listener: Listener) {
 
     interface Listener {
         fun onState(text: String)
@@ -54,30 +57,48 @@ class Link(context: Context, private val asCamera: Boolean, private val listener
         fun onQuality(rttMs: Int, percent: Int)
     }
 
-    private val client = Nearby.getConnectionsClient(context)
-    private val serviceId = "com.fmc.walkie.secure"
-    private val strategy = Strategy.P2P_POINT_TO_POINT
+    private val adapter: BluetoothAdapter? =
+        (context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
+    private val uuid: UUID = UUID.fromString("5f3c1a0e-7b2d-4c58-9a41-0d6e8b2f7c13")
     private val handler = Handler(Looper.getMainLooper())
     private val answered = BooleanArray(8)
-    private val inFlight = HashSet<Long>()
-    private var code = ""
-    private var displayName = ""
+    private val writeLock = Any()
     private var pingSeq = 0
     private var rtt = 0
+
+    @Volatile
+    private var closed = false
 
     @Volatile
     private var channel: SecureChannel? = null
 
     @Volatile
-    private var peer: String? = null
+    private var output: OutputStream? = null
+
+    @Volatile
+    private var socket: BluetoothSocket? = null
+    private var server: BluetoothServerSocket? = null
+    private var receiverRegistered = false
     private var pendingKey: ByteArray? = null
 
     val isConnected: Boolean
-        get() = peer != null
+        get() = output != null
+
+    private val discoveryReceiver = object : BroadcastReceiver() {
+        override fun onReceive(ctx: Context, intent: Intent) {
+            when (intent.action) {
+                BluetoothDevice.ACTION_FOUND -> {
+                    val device = deviceOf(intent) ?: return
+                    listener.onFound(device.address, device.name ?: "Unknown device")
+                }
+                BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> listener.onState("Scan finished. Tap a camera to connect.")
+            }
+        }
+    }
 
     private val pinger = object : Runnable {
         override fun run() {
-            if (peer == null) return
+            if (output == null) return
             listener.onQuality(rtt, answered.count { it } * 100 / answered.size)
             pingSeq += 1
             answered[pingSeq % answered.size] = false
@@ -86,141 +107,154 @@ class Link(context: Context, private val asCamera: Boolean, private val listener
         }
     }
 
-    private val payloads = object : PayloadCallback() {
-        override fun onPayloadReceived(endpointId: String, payload: Payload) {
-            if (payload.type != Payload.Type.BYTES) return
-            val bytes = payload.asBytes() ?: return
-            if (bytes.isNotEmpty()) receive(bytes)
-        }
-
-        override fun onPayloadTransferUpdate(endpointId: String, update: PayloadTransferUpdate) {
-            if (update.status != PayloadTransferUpdate.Status.IN_PROGRESS) inFlight.remove(update.payloadId)
-        }
+    fun start(code: String, name: String = "") {
+        closed = false
+        if (asCamera) listen() else discover()
     }
 
-    private val lifecycle = object : ConnectionLifecycleCallback() {
-        override fun onConnectionInitiated(endpointId: String, info: ConnectionInfo) {
-            if (info.isIncomingConnection) listener.onConnectRequest(endpointId) else accept(endpointId)
-        }
-
-        override fun onConnectionResult(endpointId: String, result: ConnectionResolution) {
-            if (!result.status.isSuccess) {
-                listener.onState("Connection failed. Check the code and try again.")
-                return
+    private fun listen() {
+        val bt = adapter ?: return
+        Thread {
+            try {
+                val serverSocket = bt.listenUsingInsecureRfcommWithServiceRecord("Sentry", uuid)
+                server = serverSocket
+                listener.onState("Camera live. Waiting for monitor...")
+                while (!closed) {
+                    val accepted = serverSocket.accept()
+                    attach(accepted)
+                }
+            } catch (e: IOException) {
+                if (!closed) listener.onState("Camera stopped listening.")
             }
-            stop()
-            val secure = SecureChannel()
-            channel = secure
-            peer = endpointId
-            answered.fill(true)
-            inFlight.clear()
-            rtt = 0
-            listener.onConnected()
-            client.sendPayload(endpointId, Payload.fromBytes(byteArrayOf(KEY) + secure.publicKey))
-            pendingKey?.let {
-                pendingKey = null
-                receive(it)
-            }
-        }
-
-        override fun onDisconnected(endpointId: String) {
-            if (endpointId != peer) return
-            reset()
-            listener.onDisconnected()
-        }
-    }
-
-    private val discovery = object : EndpointDiscoveryCallback() {
-        override fun onEndpointFound(endpointId: String, info: DiscoveredEndpointInfo) {
-            if (info.serviceId != serviceId || info.endpointName != code) return
-            listener.onFound(endpointId, "")
-            client.requestConnection(code, endpointId, lifecycle)
-                .addOnFailureListener { listener.onState("Could not reach the camera: ${it.message}") }
-        }
-
-        override fun onEndpointLost(endpointId: String) = Unit
-    }
-
-    fun start(pairingCode: String, name: String = "") {
-        code = pairingCode
-        displayName = name
-        stop()
-        client.stopAllEndpoints()
-        if (asCamera) advertise() else discover()
-    }
-
-    private fun advertise() {
-        client.startAdvertising(code, serviceId, lifecycle, AdvertisingOptions.Builder().setStrategy(strategy).build())
-            .addOnFailureListener {
-                listener.onState("Could not go live: ${it.message}. Retrying...")
-                handler.postDelayed({ if (peer == null) advertise() }, 3000)
-            }
+        }.start()
     }
 
     private fun discover() {
-        client.startDiscovery(serviceId, discovery, DiscoveryOptions.Builder().setStrategy(strategy).build())
-            .addOnFailureListener {
-                listener.onState("Could not scan: ${it.message}. Retrying...")
-                handler.postDelayed({ if (peer == null) discover() }, 3000)
+        val bt = adapter ?: return
+        bt.bondedDevices?.forEach { listener.onFound(it.address, it.name ?: it.address) }
+        if (!receiverRegistered) {
+            val filter = IntentFilter().apply {
+                addAction(BluetoothDevice.ACTION_FOUND)
+                addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)
             }
+            if (Build.VERSION.SDK_INT >= 33) {
+                context.registerReceiver(discoveryReceiver, filter, Context.RECEIVER_EXPORTED)
+            } else {
+                context.registerReceiver(discoveryReceiver, filter)
+            }
+            receiverRegistered = true
+        }
+        bt.cancelDiscovery()
+        if (bt.startDiscovery()) listener.onState("Scanning for cameras...") else listener.onState("Scan failed. Turn on Location and try again.")
     }
 
-    fun stop() {
-        client.stopAdvertising()
-        client.stopDiscovery()
+    fun rescan() {
+        val bt = adapter ?: return
+        bt.bondedDevices?.forEach { listener.onFound(it.address, it.name ?: it.address) }
+        bt.cancelDiscovery()
+        bt.startDiscovery()
     }
 
-    fun accept(endpointId: String) {
-        client.acceptConnection(endpointId, payloads)
+    fun connect(address: String) {
+        val bt = adapter ?: return
+        bt.cancelDiscovery()
+        closed = false
+        Thread {
+            try {
+                val device = bt.getRemoteDevice(address)
+                listener.onState("Connecting to ${device.name ?: address}...")
+                val pending = device.createInsecureRfcommSocketToServiceRecord(uuid)
+                pending.connect()
+                attach(pending)
+            } catch (e: IOException) {
+                listener.onState("Could not connect. Press GO LIVE on the camera first.")
+            }
+        }.start()
     }
 
-    fun reject(endpointId: String) {
-        client.rejectConnection(endpointId)
+    private fun attach(connected: BluetoothSocket) {
+        socket = connected
+        output = connected.outputStream
+        val secure = SecureChannel()
+        channel = secure
+        answered.fill(true)
+        rtt = 0
+        pendingKey = null
+        listener.onConnected()
+        writeFrame(byteArrayOf(KEY) + secure.publicKey)
+        val input = connected.inputStream
+        val header = ByteArray(4)
+        try {
+            while (!closed) {
+                if (!readFully(input, header, 4)) break
+                val length = (header[0].toInt() and 0xFF shl 24) or
+                    (header[1].toInt() and 0xFF shl 16) or
+                    (header[2].toInt() and 0xFF shl 8) or
+                    (header[3].toInt() and 0xFF)
+                if (length <= 0 || length > 1_000_000) break
+                val body = ByteArray(length)
+                if (!readFully(input, body, length)) break
+                receive(body)
+            }
+        } catch (e: IOException) {
+            closed = closed
+        }
+        close(connected)
+        channel = null
+        output = null
+        handler.removeCallbacks(pinger)
+        if (!closed) listener.onDisconnected()
     }
 
-    fun disconnect() {
-        peer?.let { client.disconnectFromEndpoint(it) }
-        reset()
-    }
-
-    fun shutdown() {
-        stop()
-        client.stopAllEndpoints()
-        reset()
+    private fun readFully(input: InputStream, buffer: ByteArray, length: Int): Boolean {
+        var read = 0
+        while (read < length) {
+            val count = try {
+                input.read(buffer, read, length - read)
+            } catch (e: IOException) {
+                return false
+            }
+            if (count < 0) return false
+            read += count
+        }
+        return true
     }
 
     fun send(type: Byte, body: ByteArray = ByteArray(0)): Boolean {
-        val target = peer ?: return false
         val sealed = channel?.seal(byteArrayOf(type) + body) ?: return false
-        client.sendPayload(target, Payload.fromBytes(byteArrayOf(SEALED) + sealed))
-        return true
+        return writeFrame(byteArrayOf(SEALED) + sealed)
     }
 
-    fun sendMedia(type: Byte, body: ByteArray): Boolean {
-        if (inFlight.size >= 3) return false
-        val target = peer ?: return false
-        val sealed = channel?.seal(byteArrayOf(type) + body) ?: return false
-        val payload = Payload.fromBytes(byteArrayOf(SEALED) + sealed)
-        client.sendPayload(target, payload)
-        inFlight.add(payload.id)
-        return true
-    }
+    fun sendMedia(type: Byte, body: ByteArray): Boolean = send(type, body)
 
     private fun internal(type: Byte, body: ByteArray) {
-        val target = peer ?: return
         val sealed = channel?.seal(byteArrayOf(type) + body) ?: return
-        client.sendPayload(target, Payload.fromBytes(byteArrayOf(SEALED) + sealed))
+        writeFrame(byteArrayOf(SEALED) + sealed)
     }
 
-    private fun reset() {
-        handler.removeCallbacks(pinger)
-        peer = null
-        channel = null
-        pendingKey = null
-        inFlight.clear()
+    private fun writeFrame(frame: ByteArray): Boolean {
+        val stream = output ?: return false
+        return try {
+            synchronized(writeLock) {
+                stream.write(
+                    byteArrayOf(
+                        (frame.size ushr 24).toByte(),
+                        (frame.size ushr 16).toByte(),
+                        (frame.size ushr 8).toByte(),
+                        frame.size.toByte()
+                    )
+                )
+                stream.write(frame)
+                stream.flush()
+            }
+            true
+        } catch (e: IOException) {
+            false
+        }
     }
 
     private fun receive(bytes: ByteArray) {
+        if (bytes.isEmpty()) return
         val secure = channel
         if (secure == null) {
             if (bytes[0] == KEY) pendingKey = bytes
@@ -249,6 +283,64 @@ class Link(context: Context, private val asCamera: Boolean, private val listener
                 }
             }
             else -> listener.onMessage(bytes[0], bytes, 1, bytes.size - 1)
+        }
+    }
+
+    fun stop() {
+        adapter?.cancelDiscovery()
+    }
+
+    fun accept(id: String) = Unit
+
+    fun reject(id: String) = Unit
+
+    fun disconnect() {
+        closed = true
+        handler.removeCallbacks(pinger)
+        close(socket)
+        socket = null
+        output = null
+        channel = null
+    }
+
+    fun shutdown() {
+        closed = true
+        handler.removeCallbacks(pinger)
+        adapter?.cancelDiscovery()
+        if (receiverRegistered) {
+            try {
+                context.unregisterReceiver(discoveryReceiver)
+            } catch (e: IllegalArgumentException) {
+                receiverRegistered = false
+            }
+            receiverRegistered = false
+        }
+        try {
+            server?.close()
+        } catch (e: IOException) {
+            server = null
+        }
+        close(socket)
+        server = null
+        socket = null
+        output = null
+        channel = null
+    }
+
+    private fun close(target: BluetoothSocket?) {
+        try {
+            target?.close()
+        } catch (e: IOException) {
+            closed = closed
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun deviceOf(intent: Intent): BluetoothDevice? {
+        return if (Build.VERSION.SDK_INT >= 33) {
+            intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+        } else {
+            intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
         }
     }
 

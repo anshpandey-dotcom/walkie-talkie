@@ -59,6 +59,8 @@ class LinkService : Service(), Link.Listener {
     private var started = false
     private var stopping = false
     private var cameraName = ""
+    private var reconnectAddress = ""
+    val devices = LinkedHashMap<String, String>()
 
     private var baseline = 1200.0
     private var triggerUntil = 0L
@@ -127,7 +129,7 @@ class LinkService : Service(), Link.Listener {
                 code = intent?.getStringExtra(EXTRA_CODE) ?: code
                 cameraName = intent?.getStringExtra(EXTRA_NAME) ?: cameraName
                 goForeground()
-                if (code.length == 6) begin(camera, code, cameraName)
+                begin(camera, code, cameraName)
                 return START_NOT_STICKY
             }
         }
@@ -272,8 +274,8 @@ class LinkService : Service(), Link.Listener {
         }
         val now = SystemClock.elapsedRealtime()
         val active = streaming || now < triggerUntil
-        if (active && now - lastVideo > 110) {
-            val jpeg = engine.encode(data, if (now < triggerUntil) 60 else 45)
+        if (active && now - lastVideo > 500) {
+            val jpeg = engine.encode(data, 40)
             if (link.sendMedia(Op.VIDEO, byteArrayOf((rotation / 90).toByte()) + jpeg)) lastVideo = now
         }
         if (now > triggerUntil && !streaming && cameraOn) handler.post { ensureCamera(false) }
@@ -285,8 +287,23 @@ class LinkService : Service(), Link.Listener {
     }
 
     override fun onFound(id: String, name: String) {
-        status = "Camera found. Connecting..."
+        devices[id] = name
+        if (!camera && !connected && id == reconnectAddress) {
+            connectTo(id)
+        }
+        status = "Found ${devices.size} device(s). Tap one to connect."
         changed()
+    }
+
+    fun connectTo(address: String) {
+        reconnectAddress = address
+        status = "Connecting..."
+        changed()
+        link.connect(address)
+    }
+
+    fun rescan() {
+        link.rescan()
     }
 
     override fun onConnectRequest(id: String) {
@@ -366,14 +383,13 @@ class LinkService : Service(), Link.Listener {
         if (camera) {
             ensureCamera(false)
             status = "Monitor disconnected. Camera live, waiting."
-            link.start(code, cameraName)
         } else {
             audio.stop()
-            if (started) {
-                status = "Link dropped. Reconnecting to code $code..."
-                link.start(code)
+            if (started && reconnectAddress.isNotEmpty()) {
+                status = "Link dropped. Reconnecting..."
+                handler.postDelayed({ if (started && !connected) link.connect(reconnectAddress) }, 1500)
             } else {
-                status = "Disconnected. Send a new pair request."
+                status = "Disconnected."
             }
         }
         changed()
@@ -438,9 +454,9 @@ class LinkService : Service(), Link.Listener {
             length >= 5 && data[offset] == SUB_TOKEN -> {
                 proximity?.peerToken = ByteBuffer.wrap(data, offset + 1, 4).int
             }
-            data[offset] == SUB_NAME && length > 1 -> {
+            data[offset] == SUB_NAME && length > 1 && reconnectAddress.isNotEmpty() -> {
                 val name = String(data, offset + 1, length - 1, Charsets.UTF_8)
-                getSharedPreferences("mon", Context.MODE_PRIVATE).edit().putString("name_$code", name).apply()
+                getSharedPreferences("mon", Context.MODE_PRIVATE).edit().putString("name_$reconnectAddress", name).apply()
             }
         }
     }
