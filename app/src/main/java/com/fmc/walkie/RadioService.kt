@@ -285,24 +285,14 @@ class LinkService : Service(), Link.Listener {
     }
 
     override fun onFound(id: String, name: String) {
-        if (name.isNotEmpty()) {
-            getSharedPreferences("mon", Context.MODE_PRIVATE).edit().putString("name_$code", name).apply()
-        }
-        status = if (name.isEmpty()) "Camera found. Connecting..." else "Found \"$name\". Connecting..."
+        status = "Camera found. Connecting..."
         changed()
     }
 
     override fun onConnectRequest(id: String) {
-        if (getSharedPreferences("svc", Context.MODE_PRIVATE).getBoolean("trust_$code", false)) {
-            link.accept(id)
-            return
-        }
-        pendingId = id
-        hasRequest = true
-        status = "A monitor wants to connect. Accept?"
-        notifyRequest()
+        link.accept(id)
+        status = "Monitor connecting..."
         changed()
-        handler.post { ui?.onIncoming() }
     }
 
     fun acceptRequest() {
@@ -357,6 +347,9 @@ class LinkService : Service(), Link.Listener {
                 it.start()
                 link.send(Op.STATE, byteArrayOf(SUB_TOKEN) + ByteBuffer.allocate(4).putInt(it.token).array())
             }
+        }
+        if (camera && cameraName.isNotEmpty()) {
+            link.send(Op.STATE, byteArrayOf(SUB_NAME) + cameraName.toByteArray(Charsets.UTF_8))
         }
         changed()
     }
@@ -441,8 +434,14 @@ class LinkService : Service(), Link.Listener {
     }
 
     private fun onStateMessage(data: ByteArray, offset: Int, length: Int) {
-        if (length >= 5 && data[offset] == SUB_TOKEN) {
-            proximity?.peerToken = ByteBuffer.wrap(data, offset + 1, 4).int
+        when {
+            length >= 5 && data[offset] == SUB_TOKEN -> {
+                proximity?.peerToken = ByteBuffer.wrap(data, offset + 1, 4).int
+            }
+            data[offset] == SUB_NAME && length > 1 -> {
+                val name = String(data, offset + 1, length - 1, Charsets.UTF_8)
+                getSharedPreferences("mon", Context.MODE_PRIVATE).edit().putString("name_$code", name).apply()
+            }
         }
     }
 
@@ -694,5 +693,6 @@ class LinkService : Service(), Link.Listener {
         private const val NOTIFY_ALERT = 2
         private const val NOTIFY_REQUEST = 4
         private const val SUB_TOKEN: Byte = 1
+        private const val SUB_NAME: Byte = 2
     }
 }

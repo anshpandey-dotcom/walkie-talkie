@@ -132,10 +132,8 @@ class Link(context: Context, private val asCamera: Boolean, private val listener
 
     private val discovery = object : EndpointDiscoveryCallback() {
         override fun onEndpointFound(endpointId: String, info: DiscoveredEndpointInfo) {
-            if (info.serviceId != serviceId) return
-            val name = info.endpointName
-            if (name.substringBefore('~') != code) return
-            listener.onFound(endpointId, name.substringAfter('~', ""))
+            if (info.serviceId != serviceId || info.endpointName != code) return
+            listener.onFound(endpointId, "")
             client.requestConnection(code, endpointId, lifecycle)
                 .addOnFailureListener { listener.onState("Could not reach the camera: ${it.message}") }
         }
@@ -152,8 +150,7 @@ class Link(context: Context, private val asCamera: Boolean, private val listener
     }
 
     private fun advertise() {
-        val label = if (displayName.isEmpty()) code else "$code~${displayName.replace('~', ' ')}"
-        client.startAdvertising(label, serviceId, lifecycle, AdvertisingOptions.Builder().setStrategy(strategy).build())
+        client.startAdvertising(code, serviceId, lifecycle, AdvertisingOptions.Builder().setStrategy(strategy).build())
             .addOnFailureListener {
                 listener.onState("Could not go live: ${it.message}. Retrying...")
                 handler.postDelayed({ if (peer == null) advertise() }, 3000)
